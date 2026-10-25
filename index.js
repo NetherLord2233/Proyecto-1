@@ -52,11 +52,11 @@ const log = {
 
 const { say } = cfonts;
 console.log(chalk.magentaBright('\n❀ Iniciando Sistema...'));
-say('elaina na', {
+say('elaina', {
   align: 'center',
   gradient: ['red', 'blue']
 });
-say('code by: NetherLord2233', {
+say('handler & index by: NetherLord2233', {
   font: 'console',
   align: 'center',
   gradient: ['blue', 'magenta']
@@ -135,14 +135,11 @@ const BOT_TYPES = [
 
 const GHOST_SESSION_MS = 10 * 60 * 1000;
 
-// Las sesiones de los sub-bots viven en SQL (dentro de subbot.js). Las carpetas viejas de
-// Sessions/Subs solo quedan como respaldo: se importan una vez al arrancar y no se borran.
 async function loadBots() {
   for (const { name, starter } of BOT_TYPES) {
     for (const { id: userId, registered, updatedAt } of listSessions()) {
       if (global.SUBS_ACTIVE?.has(userId) || global.SUBS_STOPPED?.has(userId)) continue;
 
-      // Sesión que nunca llegó a vincularse ("fantasma"): no se arranca; si es vieja, se borra.
       if (!registered) {
         if (Date.now() - updatedAt > GHOST_SESSION_MS) {
           try { deleteSession(userId); log.warn(`${name} ${userId}: sesión sin vincular eliminada.`); } catch {}
@@ -176,14 +173,12 @@ async function initDB() {
 function clearSession() {
   try {
     if (ownerUsesFolder) {
-      // Arranque de emergencia con la carpeta original (la importación a SQL había fallado)
       const sessionDir = './Sessions/Owner';
       if (!fs.existsSync(sessionDir)) return;
       for (const file of fs.readdirSync(sessionDir)) {
         try { fs.unlinkSync(path.join(sessionDir, file)); } catch {}
       }
     } else {
-      // La sesión vive en SQL; la carpeta original de Sessions/Owner no se toca (respaldo)
       deleteSession(OWNER_SESSION_ID);
     }
     log.warn('Sesión del principal eliminada — reiniciando para vincular de nuevo...');
@@ -212,9 +207,7 @@ async function resolveSender(sock, msg) {
   return sender;
 }
 
-// Sesión del bot principal en SQL. Se importa Sessions/Owner (sin borrarla) ANTES de decidir si hay que vincular.
 const ownerMigration = migrateOwnerSession('./Sessions/Owner', (msg) => log.info(msg));
-// Si la importación falló (archivo dañado, disco lleno...), este arranque usa la carpeta original para no perder la sesión.
 const ownerUsesFolder = ownerMigration === 'failed' && fs.existsSync('./Sessions/Owner/creds.json');
 if (ownerUsesFolder) log.warn('No se pudo importar la sesión del principal a SQL: se usa la carpeta original (Sessions/Owner) por ahora.');
 const ownerLinked = ownerUsesFolder || sessionExists(OWNER_SESSION_ID);
@@ -476,7 +469,6 @@ cleanCache(0);
 (async () => {
   await initDB();
   try {
-    // Importa a SQL las sesiones de sub-bots que sigan en carpetas. No borra nada: las carpetas quedan de respaldo.
     const m = migrateLegacySessions('./Sessions/Subs', (msg) => log.info(msg));
     if (m.migrated) log.success(`Sub-bots importados a SQL: ${m.migrated}`);
     if (m.failed) log.warn(`Sesiones que no se pudieron importar: ${m.failed} (siguen en su carpeta)`);
