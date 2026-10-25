@@ -1,0 +1,34 @@
+function makeOfflineNodeProcessor(nodeProcessorMap, deps, batchSize = 10) {
+  const nodes = [];
+  let isProcessing = false;
+  const enqueue = (type, node) => {
+    nodes.push({ type, node });
+    if (isProcessing) {
+      return;
+    }
+    isProcessing = true;
+    const promise = async () => {
+      let processedInBatch = 0;
+      while (nodes.length && deps.isWsOpen()) {
+        const { type: type2, node: node2 } = nodes.shift();
+        const nodeProcessor = nodeProcessorMap.get(type2);
+        if (!nodeProcessor) {
+          deps.onUnexpectedError(new Error(`unknown offline node type: ${type2}`), "processing offline node");
+          continue;
+        }
+        await nodeProcessor(node2).catch((err) => deps.onUnexpectedError(err, `processing offline ${type2}`));
+        processedInBatch++;
+        if (processedInBatch >= batchSize) {
+          processedInBatch = 0;
+          await deps.yieldToEventLoop();
+        }
+      }
+      isProcessing = false;
+    };
+    promise().catch((error) => deps.onUnexpectedError(error, "processing offline nodes"));
+  };
+  return { enqueue };
+}
+export {
+  makeOfflineNodeProcessor
+};
