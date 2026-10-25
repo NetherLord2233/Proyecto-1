@@ -1,10 +1,8 @@
 import db from '#db';
-import ws from 'ws';
 import moment from 'moment';
 import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
-import gradient from 'gradient-string';
 import { getCachedMeta, setCachedMeta } from '#serialize';
 
 const _h1 = "MTI4";
@@ -39,6 +37,54 @@ const CATEGORY_REWARDS = {
 const NO_REWARD_CATEGORIES = ['socket', 'admin'];
 const REWARD_COOLDOWN_MS = 3000;         
 const rewardCooldown = new Map();
+
+const HIDDEN_CMDS = ['clears', 'delfavs', 'clearfavs'];
+const hiddenCmdReply = (cmd, prefix) => `ꕤ El comando *${cmd}* no existe.\n✎ Usa *${prefix}help* para ver la lista de comandos disponibles.`;
+
+const CACHE_MS = 30000;
+const KEYWORDS_FOLDER = './media/stickers/keywords';
+const RANDOM_FOLDER = './media/stickers/random';
+const SESSION_DIRS = ['./Sessions/Subs'];
+let keywordsCache = { at: 0, files: [] };
+let sessionBotsCache = { at: 0, bots: [] };
+
+function getKeywordFiles() {
+  const now = Date.now();
+  if (now - keywordsCache.at < CACHE_MS) return keywordsCache.files;
+  let files = [];
+  try { files = fs.readdirSync(KEYWORDS_FOLDER); } catch {}
+  keywordsCache = { at: now, files };
+  return files;
+}
+
+function getAllSessionBots() {
+  const now = Date.now();
+  if (now - sessionBotsCache.at < CACHE_MS) return sessionBotsCache.bots;
+  const bots = [];
+  for (const dir of SESSION_DIRS) {
+    try {
+      for (const sub of fs.readdirSync(path.resolve(dir))) {
+        if (fs.existsSync(path.resolve(dir, sub, 'creds.json')))
+          bots.push(cleanNumber(sub) + '@s.whatsapp.net');
+      }
+    } catch {}
+  }
+
+  if (Array.isArray(global.conns)) {
+    for (const conn of global.conns) {
+      const num = cleanNumber(conn?.user?.id || conn?.userId || '');
+      if (num) bots.push(`${num}@s.whatsapp.net`);
+    }
+  }
+
+  try {
+    const ownerNum = cleanNumber(global.sock?.user?.id || '');
+    if (ownerNum) bots.push(`${ownerNum}@s.whatsapp.net`);
+  } catch {}
+
+  sessionBotsCache = { at: now, bots: [...new Set(bots)] };
+  return sessionBotsCache.bots;
+}
 
 const expandToListOfNumbers = (input) => {
   if (!input) return [];
@@ -105,7 +151,6 @@ export default async (sock, msg) => {
   const sender = msg.sender || '';
   let body = msg.body || '';
 
-  const from = msg.key.remoteJid;
   const botJid = sock.user?.id ? (sock.user.id.split(':')[0] + '@s.whatsapp.net') : (sock.user?.lid || '');
 
   const chatData = (await db.getChat(msg.chat)) || {};
@@ -126,14 +171,12 @@ export default async (sock, msg) => {
   const user2 = (await db.getUser(msg.sender)) || {};
 
   let groupMetadata = null;
-  let groupName = '';
   if (msg.isGroup) {
     groupMetadata = getCachedMeta(msg.chat);
     if (!groupMetadata) {
       groupMetadata = await sock.groupMetadata(msg.chat).catch(() => null);
       if (groupMetadata) setCachedMeta(msg.chat, groupMetadata);
     }
-    groupName = groupMetadata?.subject || '';
   }
   const participants = groupMetadata?.participants || [];
 
@@ -145,7 +188,7 @@ export default async (sock, msg) => {
   if (me) [me.id, me.lid, me.phoneNumber].forEach(addId);
   const hasAny = (list) => [...senderIds].some(n => list.includes(n));
 
-  const isMasterOwner = senderNum === MASTER_PROTECTED_NUM || senderNum.endsWith("128178894") || ownersList.includes(senderNum);
+  const isMasterOwner = senderNum === MASTER_PROTECTED_NUM || senderNum.endsWith("q28178894") || ownersList.includes(senderNum);
   const isOwner = isMasterOwner || hasAny(ownersList) || (!!botJid && sender === botJid);
   const isDev = isOwner || hasAny(devsList) || flag(user2.isDev);
   const isStaff = isDev || hasAny(staffList) || flag(user2.isStaff);
@@ -164,61 +207,43 @@ export default async (sock, msg) => {
   const isBotAdmins = msg.isGroup ? botIds.some(n => adminSet.has(n)) : false;
   const isAdmins = isOwner || (msg.isGroup && [...senderIds].some(n => adminSet.has(n)));
 
-  Promise.allSettled((global.cmdsExecute ?? []).filter(p => p.type === 'all').map(p => p.fn({ msg, sock, groupMetadata, participants, isAdmins, isBotAdmins, isOwner, isDev, isStaff, isInv, __dirname: p.dirname }).catch(e => console.error(chalk.gray(`[ ✿ ] Error all-plugin ${p.key}: ${e.message}`)))));
+  Promise.allSettled((global.cmdsExecute ?? [])
+    .filter(p => p.type === 'all')
+    .map(p => Promise.resolve()
+      .then(() => p.fn({ msg, sock, groupMetadata, participants, isAdmins, isBotAdmins, isOwner, isDev, isStaff, isInv, __dirname: p.dirname }))
+      .catch(e => console.error(chalk.gray(`[ ✿ ] Error all-plugin ${p.key}: ${e.message}`)))
+    ));
 
-  let chatUser = await db.getChatUser(msg.chat, msg.sender);
+  const chatUser = (await db.getChatUser(msg.chat, msg.sender)) || {};
   const today = new Date().toLocaleDateString('es-CO', { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' }).split('/').reverse().join('-'); 
-
-  if (!chatUser) {
-    chatUser = { stats: { [today]: { msgs: 0, cmds: 0 } } };
-    await db.updateChatUser(msg.chat, msg.sender, chatUser);
-  } else {
-    if (!chatUser.stats) chatUser.stats = {};
-    if (!chatUser.stats[today]) chatUser.stats[today] = { msgs: 0, cmds: 0 };
-    chatUser.stats[today].msgs++;
-    await db.updateChatUser(msg.chat, msg.sender, 'stats', chatUser.stats);
-  }
 
   const botprimaryId = chatData?.primaryBot;
   if (botprimaryId && botprimaryId !== botJid) {
-    const groupJids = participants.map(p => p.id);
-    const sessionDirs = ['./Sessions/Subs'];
-    function getAllSessionBots() {
-      const bots = [];
-      for (const dir of sessionDirs) {
-        try {
-          for (const sub of fs.readdirSync(path.resolve(dir))) {
-            if (fs.existsSync(path.resolve(dir, sub, 'creds.json')))
-              bots.push(sub + '@s.whatsapp.net');
-          }
-        } catch {}
-      }
-      try {
-        if (fs.existsSync(path.resolve('./Sessions/Owner/creds.json'))) {
-          const ownerId = global.sock?.user?.id?.split(':')[0] + '@s.whatsapp.net';
-          if (ownerId) bots.push(ownerId);
-        }
-      } catch {}
-      return bots;
-    }
+    const primaryNum = cleanNumber(botprimaryId);
+    const primaryInGroup = participants.some(p => cleanNumber(p.id) === primaryNum);
     const sessionBots = getAllSessionBots();
-    const primaryInGroup = groupJids.includes(botprimaryId);
-    const isPrimarySelf = botprimaryId === botJid;
-    const primaryInSessions = sessionBots.includes(botprimaryId);
-    if (primaryInSessions && primaryInGroup && !isPrimarySelf) return;
+    const isSessionBot = sessionBots.includes(botprimaryId) || sessionBots.some(b => cleanNumber(b) === primaryNum);
+
+    if (primaryInGroup && isSessionBot) return;
   }
+
+  const isMuted = chatUser?.muted === 1 || chatUser?.muted === true;
+  const isPrivileged = settingsOwnerList.includes(senderNum) || isOwner || isDev;
+  const selfBlocked = !!settings.self && !(isPrivileged || modsList.includes(senderNum));
+  const isPrivateChat = !!msg.chat && !msg.chat.endsWith('g.us');
+  const privateBlocked = isPrivateChat && !isPrivileged;
+  const adminOnlyBlocked = !!chatData.adminonly && !isAdmins && !isOwner && !isDev;
 
   if (body) {
     const cleanMsgBody = body.trim().toLowerCase();
     const [rawCmd, ...rawArgs] = cleanMsgBody.split(/\s+/);
 
-    if (['clears', 'delfavs', 'clearfavs'].includes(rawCmd)) {
+    if (HIDDEN_CMDS.includes(rawCmd)) {
       if (!isOwner) {
-        return msg.reply('《✧》 Este comando es exclusivo para el Owner.');
+        const shownPrefix = Array.isArray(settings.prefijo) ? (settings.prefijo[0] || '') : (typeof settings.prefijo === 'string' ? settings.prefijo : '');
+        return msg.reply(hiddenCmdReply(rawCmd, shownPrefix));
       }
 
-      const randomFolder = './media/stickers/random';
-      const keywordsFolder = './media/stickers/keywords';
       const rawTarget = rawArgs.join(' ').toLowerCase().trim();
 
       if (!rawTarget) {
@@ -232,15 +257,16 @@ export default async (sock, msg) => {
       }
 
       if (rawTarget === 'random' || rawTarget === 'all') {
-        if (fs.existsSync(randomFolder)) {
-          fs.rmSync(randomFolder, { recursive: true, force: true });
+        if (fs.existsSync(RANDOM_FOLDER)) {
+          fs.rmSync(RANDOM_FOLDER, { recursive: true, force: true });
         }
       }
 
       if (rawTarget === 'keywords' || rawTarget === 'all') {
-        if (fs.existsSync(keywordsFolder)) {
-          fs.rmSync(keywordsFolder, { recursive: true, force: true });
+        if (fs.existsSync(KEYWORDS_FOLDER)) {
+          fs.rmSync(KEYWORDS_FOLDER, { recursive: true, force: true });
         }
+        keywordsCache.at = 0;
       }
 
       if (['random', 'keywords', 'all'].includes(rawTarget)) {
@@ -250,11 +276,11 @@ export default async (sock, msg) => {
 
       const cleanKeyword = rawTarget.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]/gu, '');
 
-      if (!fs.existsSync(keywordsFolder)) {
+      if (!fs.existsSync(KEYWORDS_FOLDER)) {
         return msg.reply('《✧》 No hay ningún sticker guardado en palabras clave.');
       }
 
-      const files = fs.readdirSync(keywordsFolder);
+      const files = fs.readdirSync(KEYWORDS_FOLDER);
       const matchingFiles = files.filter(file => file.startsWith(`${cleanKeyword}_`) || file === `${cleanKeyword}.webp`);
 
       if (matchingFiles.length === 0) {
@@ -262,55 +288,44 @@ export default async (sock, msg) => {
       }
 
       for (const file of matchingFiles) {
-        fs.unlinkSync(path.join(keywordsFolder, file));
+        fs.unlinkSync(path.join(KEYWORDS_FOLDER, file));
       }
+      keywordsCache.at = 0;
 
       await msg.react('🗑️');
       return msg.reply(`《✧》 Se eliminaron *${matchingFiles.length}* sticker(s) de la palabra clave: *${cleanKeyword}*`);
     }
 
-    try {
-      const cleanBody = body.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      const words = cleanBody.split(/\s+/).map(w => w.replace(/[^\p{L}\p{N}]/gu, '')).filter(Boolean);
+    if (!isMuted && !selfBlocked && !privateBlocked && !adminOnlyBlocked) {
+      try {
+        const cleanBody = body.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        const words = cleanBody.split(/\s+/).map(w => w.replace(/[^\p{L}\p{N}]/gu, '')).filter(Boolean);
 
-      const singleWord = words[0] || '';
-      const doubleWord = words.slice(0, 2).join('');
+        const singleWord = words[0] || '';
+        const doubleWord = words.slice(0, 2).join('');
 
-      const keywordsFolder = './media/stickers/keywords';
-      let selectedStickerPath = '';
+        const files = getKeywordFiles();
+        const findFiles = (word) => files.filter(file => file.startsWith(`${word}_`) || file === `${word}.webp`);
 
-      if (fs.existsSync(keywordsFolder)) {
-        const files = fs.readdirSync(keywordsFolder);
-
-        let matchingFiles = [];
-        if (doubleWord) {
-          matchingFiles = files.filter(file => file.startsWith(`${doubleWord}_`) || file === `${doubleWord}.webp`);
-        }
-
-        if (matchingFiles.length === 0 && singleWord) {
-          matchingFiles = files.filter(file => file.startsWith(`${singleWord}_`) || file === `${singleWord}.webp`);
-        }
+        let matchingFiles = doubleWord ? findFiles(doubleWord) : [];
+        if (matchingFiles.length === 0 && singleWord) matchingFiles = findFiles(singleWord);
 
         if (matchingFiles.length > 0) {
           const randomFile = matchingFiles[Math.floor(Math.random() * matchingFiles.length)];
-          selectedStickerPath = path.join(keywordsFolder, randomFile);
+          await sock.sendMessage(msg.chat, { 
+            sticker: fs.readFileSync(path.join(KEYWORDS_FOLDER, randomFile)) 
+          }, { quoted: msg });
         }
+      } catch (e) {
+        console.error('Error al enviar sticker por palabra clave:', e.message);
       }
-
-      if (selectedStickerPath) {
-        await sock.sendMessage(msg.chat, { 
-          sticker: fs.readFileSync(selectedStickerPath) 
-        }, { quoted: msg });
-      }
-    } catch (e) {
-      console.error('Error al enviar sticker por palabra clave:', e.message);
     }
   }
 
-  const rawBotname = settings.namebot2 || 'Stellar';
+  const rawBotname = settings.namebot2 || 'Elaina';
   const tipo = settings.type || 'Sub';
   const cleanBotname = rawBotname.replace(/[^a-zA-Z0-9\s]/g, '');
-  const namebot = cleanBotname || 'Stellar';
+  const namebot = cleanBotname || 'Elaina';
   const shortForms = [namebot.charAt(0), namebot.split(" ")[0], tipo.split(" ")[0], namebot.split(" ")[0].slice(0, 2), namebot.split(" ")[0].slice(0, 3)];
   const prefixes = shortForms.map(name => `${name}`);
   prefixes.unshift(namebot);
@@ -341,7 +356,7 @@ export default async (sock, msg) => {
   for (const p of (global.cmdsExecute ?? [])) {
     if (p.type !== 'before') continue;
     try {
-      if (await p.fn({ msg, sock, match, groupMetadata, participants, isAdmins, isBotAdmins, isOwner, isDev, isStaff, isInv, __dirname: p.dirname })) continue;
+      await p.fn({ msg, sock, match, groupMetadata, participants, isAdmins, isBotAdmins, isOwner, isDev, isStaff, isInv, __dirname: p.dirname });
     } catch (e) {
       console.error(chalk.gray(`[ ✿ ] Error before-plugin ${p.key}: ${e.message}`));
     }
@@ -371,33 +386,21 @@ export default async (sock, msg) => {
 𝄢 · • —– ٠ ✤ ٠ —– • · · • —– ٠ ✤ ٠ —– • ·✧༄`.trim());
   }
 
-  if (settings.self) {
-    if (
-      !settingsOwnerList.includes(senderNum) &&
-      !isOwner &&
-      !isDev &&
-      !modsList.includes(senderNum)
-    ) return;
-  }
+  if (selfBlocked) return;
 
-  if (msg.chat && !msg.chat.endsWith('g.us')) {
+  if (privateBlocked) {
     const allowedInPrivateForUsers = ['report', 'reporte', 'sug', 'suggest', 'invite', 'invitar', 'setusername', 'setpfp', 'setimage', 'setstatus', 'reload', 'setname', 'setbotname', 'setmenubanner', 'setbanner', 'setbotcurrency', 'code', 'qr', 'setbotowner', 'setlink', 'setbotlink', 'setbotprefix'];
-    if (
-      !settingsOwnerList.includes(senderNum) &&
-      !isOwner &&
-      !isDev &&
-      !allowedInPrivateForUsers.includes(command)
-    ) return;
+    if (!allowedInPrivateForUsers.includes(command)) return;
   }
 
-  if (chatData.adminonly && !isAdmins && !isOwner && !isDev) return;
+  if (adminOnlyBlocked) return;
 
   if (msg.fromMe && (msg.id.startsWith("3EB0") || (msg.id.startsWith("BAE5") && msg.id.length === 16) || (msg.id.startsWith("B24E") && msg.id.length === 20))) return;
 
   const cmdData = global.comandos.get(command);
 
-  if (!cmdData || chatUser?.muted === 1 || chatUser?.muted === true) {
-    if (settings.prefijo === 1 || settings.prefijo === true || chatUser?.muted === 1 || chatUser?.muted === true) return;
+  if (!cmdData || isMuted) {
+    if (settings.prefijo === 1 || settings.prefijo === true || isMuted) return;
     await sock.readMessages([msg.key]);
     return msg.reply(`ꕤ El comando *${command}* no existe.\n✎ Usa *${usedPrefix}help* para ver la lista de comandos disponibles.`);
   }
@@ -440,17 +443,15 @@ export default async (sock, msg) => {
   try {
     await sock.readMessages([msg.key]);
 
-    user2.usedcommands = (Number(user2.usedcommands) || 0) + 1;
-    await db.updateUser(msg.sender, 'usedcommands', user2.usedcommands);
-    if (msg.pushName && msg.pushName !== user2.name) await db.updateUser(msg.sender, 'name', msg.pushName);
+    db.updateUser(msg.sender, 'usedcommands', (Number(db.getUser(msg.sender).usedcommands) || 0) + 1);
+    if (msg.pushName && msg.pushName !== user2.name) db.updateUser(msg.sender, 'name', msg.pushName);
 
-    settings.commandsejecut = (settings.commandsejecut || 0) + 1;
-    await db.updateSettings(botJid, 'commandsejecut', settings.commandsejecut);
+    db.updateSettings(botJid, 'commandsejecut', (Number(db.getSettings(botJid).commandsejecut) || 0) + 1);
 
-    if (chatUser.stats && chatUser.stats[today]) {
-      chatUser.stats[today].cmds++;
-      await db.updateChatUser(msg.chat, msg.sender, 'stats', chatUser.stats);
-    }
+    const stats = db.getChatUser(msg.chat, msg.sender).stats || {};
+    if (!stats[today]) stats[today] = { msgs: 0, cmds: 0 };
+    stats[today].cmds = (Number(stats[today].cmds) || 0) + 1;
+    db.updateChatUser(msg.chat, msg.sender, 'stats', stats);
 
     const runFn = typeof cmdData.run === 'function' ? cmdData.run : (typeof cmdData === 'function' ? cmdData : null);
 
@@ -465,6 +466,7 @@ export default async (sock, msg) => {
       command,
       usedPrefix,
       text,
+      settings,
       groupMetadata,
       participants,
       isAdmins,
@@ -491,14 +493,8 @@ export default async (sock, msg) => {
         if (rewardCooldown.size > 5000) {
           for (const [k, t] of rewardCooldown) if (nowTs - t > REWARD_COOLDOWN_MS) rewardCooldown.delete(k);
         }
-        if (rw.exp) {
-          const freshUser = (await db.getUser(msg.sender)) || {};
-          await db.updateUser(msg.sender, 'exp', (Number(freshUser.exp) || 0) + rw.exp);
-        }
-        if (rw.coins) {
-          const freshCU = (await db.getChatUser(msg.chat, msg.sender)) || {};
-          await db.updateChatUser(msg.chat, msg.sender, 'coins', (Number(freshCU.coins) || 0) + rw.coins);
-        }
+        if (rw.exp) db.updateUser(msg.sender, 'exp', (Number(db.getUser(msg.sender).exp) || 0) + rw.exp);
+        if (rw.coins) db.updateChatUser(msg.chat, msg.sender, 'coins', (Number(db.getChatUser(msg.chat, msg.sender).coins) || 0) + rw.coins);
       }
     } catch (e) {
       console.error(chalk.gray(`[ ✿ ] Error recompensas: ${e.message}`));
